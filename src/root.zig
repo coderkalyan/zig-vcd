@@ -363,7 +363,7 @@ pub fn parse(allocator: Allocator, source: [:0]const u8) !ValueChangeDump {
 
                     pos, const str = try eatToken(source, pos);
                     const time = try std.fmt.parseInt(u32, str, 10);
-                    current_time += time;
+                    current_time = time;
 
                     pos = skipWhitespace(source, pos) catch break :fsm;
                     continue :fsm .body;
