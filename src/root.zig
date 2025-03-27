@@ -198,6 +198,11 @@ pub const ValueChangeDump = struct {
         }
         allocator.free(self.signals);
     }
+
+    pub fn span(self: *const ValueChangeDump, index: u32) []const u8 {
+        const ptr: [*:0]const u8 = @ptrCast(&self.bytes[index]);
+        return std.mem.span(ptr);
+    }
 };
 
 const IndexContext = struct {
@@ -387,16 +392,19 @@ pub fn parse(allocator: Allocator, source: [:0]const u8) !ValueChangeDump {
                 'b' => {
                     pos += 1;
 
-                    pos, const bits = try eatToken(source, pos);
+                    pos, const source_bits = try eatToken(source, pos);
                     pos = try skipWhitespace(source, pos);
                     pos, const code = try eatToken(source, pos);
 
                     const adapter: SliceAdapter = .{ .bytes = bytes.items };
                     const index = string_table.getKeyAdapted(code, adapter).?;
-
                     const signal_index = map.get(index) orelse return error.UnknownVariableCode;
                     const signal = &signals.items[signal_index];
-                    try signal.waves.appendSlice(allocator, bits);
+
+                    const width = signal.shape.width();
+                    std.debug.assert(width > 1);
+                    const bits = try signal.waves.addManyAsSlice(allocator, width);
+                    extend(bits, source_bits);
                     try signal.times.append(allocator, current_time);
 
                     pos = skipWhitespace(source, pos) catch break :fsm;
@@ -451,17 +459,20 @@ pub fn parse(allocator: Allocator, source: [:0]const u8) !ValueChangeDump {
                 'b' => {
                     pos += 1;
 
-                    pos, const bits = try eatToken(source, pos);
+                    pos, const source_bits = try eatToken(source, pos);
                     pos = try skipWhitespace(source, pos);
                     pos, const code = try eatToken(source, pos);
                     pos = try skipWhitespace(source, pos);
 
                     const adapter: SliceAdapter = .{ .bytes = bytes.items };
                     const index = string_table.getKeyAdapted(code, adapter).?;
-
                     const signal_index = map.get(index) orelse return error.UnknownVariableCode;
                     const signal = &signals.items[signal_index];
-                    try signal.waves.appendSlice(allocator, bits);
+
+                    const width = signal.shape.width();
+                    std.debug.assert(width > 1);
+                    const bits = try signal.waves.addManyAsSlice(allocator, width);
+                    extend(bits, source_bits);
                     try signal.times.append(allocator, current_time);
 
                     continue :fsm .dumpvars;
@@ -746,12 +757,16 @@ pub fn parse(allocator: Allocator, source: [:0]const u8) !ValueChangeDump {
 
     const out_signals = try allocator.alloc(Signal, signals.items.len);
     for (signals.items, 0..) |*signal, i| {
+        const waves = try signal.waves.toOwnedSlice(allocator);
+        const times = try signal.times.toOwnedSlice(allocator);
+        std.debug.assert(waves.len == (times.len * signal.shape.width()));
+
         out_signals[i] = .{
             .shape = signal.shape,
             .code = signal.code,
             .name = signal.name,
-            .waves = try signal.waves.toOwnedSlice(allocator),
-            .times = try signal.times.toOwnedSlice(allocator),
+            .waves = waves,
+            .times = times,
         };
     }
 
@@ -811,20 +826,20 @@ fn eatToken(source: [:0]const u8, start: usize) !struct { usize, []const u8 } {
     return .{ pos, source[start..pos] };
 }
 
-const ValueChange = struct {
-    tag: Tag,
-    value: []const u8,
-    code: []const u8,
+fn extend(out: []u8, in: []const u8) void {
+    std.debug.assert(out.len >= in.len);
+    std.debug.assert(in.len >= 1);
 
-    pub const Tag = enum(u8) { scalar, vector };
-};
+    const amount = out.len - in.len;
+    const fill: u8 = switch (in[0]) {
+        '0', '1' => '0',
+        inline 'z', 'Z', 'x', 'X' => |val| val,
+        else => unreachable,
+    };
 
-// fn eatValueChange(source: [:0]const u8, start: usize) !ValueChange {
-//     var pos = start;
-//     switch (source[pos]) {
-//         else => return error.UnexpectedCharacter,
-//     }
-// }
+    @memset(out[0..amount], fill);
+    @memcpy(out[amount..], in);
+}
 
 test "basic parsing" {
     const gpa = std.testing.allocator;
@@ -843,4 +858,8 @@ test "basic parsing" {
 
     const vcd = try parse(gpa, source);
     defer vcd.deinit(gpa);
+
+    const signal = &vcd.signals[0];
+    const name = vcd.span(signal.name);
+    std.debug.print("{s} {}\n{s}\n{any}\n", .{ name, signal.shape, signal.waves, signal.times });
 }
